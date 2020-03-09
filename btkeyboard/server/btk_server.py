@@ -1,14 +1,9 @@
-#!/usr/bin/python
-#
+#!/usr/bin/env python3
+
 # YAPTB Bluetooth keyboard emulator DBUS Service
 # 
 # Adapted from 
-# www.linuxuser.co.uk/tutorials/emulate-bluetooth-keyboard-with-the-raspberry-pi
-#
-#
-
-#from __future__ import absolute_import, print_function, unicode_literals
-from __future__ import absolute_import, print_function
+# www.linuxuser.co.uk/tutorials/emulate-bluetooth-keyboard-with-the-raspberry-p
 
 from optparse import OptionParser, make_option
 import os
@@ -16,19 +11,16 @@ import sys
 import uuid
 import dbus
 import dbus.service
-import dbus.mainloop.glib
+import dbus.mainloop.qt
+import PyQt4.QtCore
 import time
 import bluetooth
 from bluetooth import *
 
-
-import gtk
-from dbus.mainloop.glib import DBusGMainLoop
-
-
 #
 #define a bluez 5 profile object for our keyboard
 #
+
 class BTKbBluezProfile(dbus.service.Object):
     fd = -1
 
@@ -73,7 +65,7 @@ class BTKbBluezProfile(dbus.service.Object):
 #
 class BTKbDevice():
     #change these constants 
-    MY_ADDRESS="00:1A:7D:DA:71:13"
+    MY_ADDRESS="B8:27:EB:5A:D2:BE"
     MY_DEV_NAME="DeskPi_BTKb"
 
     #define some constants
@@ -172,8 +164,7 @@ class BTKbDevice():
 
     #send a string to the bluetooth host machine
     def send_string(self,message):
-
-     #    print("Sending "+message)
+         print("Sending ", bytes(message, 'utf-8'))
          self.cinterrupt.send(message)
 
 
@@ -222,7 +213,7 @@ if __name__ == "__main__":
     if not os.geteuid() == 0:
        sys.exit("Only root can run this script")
 
-    DBusGMainLoop(set_as_default=True)
+    dbus.mainloop.qt.DBusQtMainLoop(set_as_default=True)
+    app = PyQt4.QtCore.QCoreApplication([])
     myservice = BTKbService();
-    gtk.main()
-    
+    app.exec_()

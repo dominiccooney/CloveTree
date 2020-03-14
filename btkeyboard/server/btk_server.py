@@ -1,23 +1,53 @@
 #!/usr/bin/env python3
 
 # YAPTB Bluetooth keyboard emulator DBUS Service
-# 
-# Adapted from 
+#
+# Adapted from
 # www.linuxuser.co.uk/tutorials/emulate-bluetooth-keyboard-with-the-raspberry-p
 # https://gist.github.com/ukBaz/a47e71e7b87fbc851b27cde7d1c0fcf0#file-btk_server-py
 
-from optparse import OptionParser, make_option
 import os
 import signal
+import socket
 import sys
-import uuid
 import dbus
 import dbus.service
 import dbus.mainloop.qt
 import PyQt4.QtCore
-import time
-import bluetooth
-from bluetooth import *
+
+
+class HumanInterfaceDeviceProfile(dbus.service.Object):
+    """
+    BlueZ D-Bus Profile for HID
+    """
+    fd = -1
+
+    @dbus.service.method('org.bluez.Profile1',
+                         in_signature='', out_signature='')
+    def Release(self):
+            print('Release')
+            mainloop.quit()
+
+    @dbus.service.method('org.bluez.Profile1',
+                         in_signature='oha{sv}', out_signature='')
+    def NewConnection(self, path, fd, properties):
+            self.fd = fd.take()
+            print('NewConnection({}, {})'.format(path, self.fd))
+            for key in properties.keys():
+                    if key == 'Version' or key == 'Features':
+                            print('  {} = 0x{:04x}'.format(key,
+                                                           properties[key]))
+                    else:
+                            print('  {} = {}'.format(key, properties[key]))
+
+    @dbus.service.method('org.bluez.Profile1',
+                         in_signature='o', out_signature='')
+    def RequestDisconnection(self, path):
+            print('RequestDisconnection {}'.format(path))
+
+            if self.fd > 0:
+                    os.close(self.fd)
+                    self.fd = -1
 
 #
 #define a bluez 5 profile object for our keyboard
@@ -46,7 +76,7 @@ class BTKbBluezProfile(dbus.service.Object):
                             print("  %s = 0x%04x" % (key, properties[key]))
                     else:
                             print("  %s = %s" % (key, properties[key]))
-            
+
 
 
     @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
@@ -62,107 +92,202 @@ class BTKbBluezProfile(dbus.service.Object):
 
 
 #
-#create a bluetooth device to emulate a HID keyboard, 
+#create a bluetooth device to emulate a HID keyboard,
 # advertize a SDP record using our bluez profile class
 #
 class BTKbDevice():
-    #change these constants 
+    #change these constants
     MY_ADDRESS="B8:27:EB:5A:D2:BE"
     MY_DEV_NAME="DeskPi_BTKb"
 
     #define some constants
     P_CTRL =17  #Service port - must match port configured in SDP record
-    P_INTR =19  #Service port - must match port configured in SDP record#Interrrupt port  
-    PROFILE_DBUS_PATH="/bluez/yaptb/btkb_profile" #dbus path of  the bluez profile we will create
-    SDP_RECORD_PATH = sys.path[0] + "/sdp_record.xml" #file path of the sdp record to laod
-    UUID="00001124-0000-1000-8000-00805f9b34fb"
-             
- 
-    def __init__(self):
+    P_INTR =19  #Service port - must match port configured in SDP record#Interrrupt port
+    # BlueZ dbus
+    PROFILE_DBUS_PATH = '/bluez/yaptb/btkb_profile'
+    ADAPTER_IFACE = 'org.bluez.Adapter1'
+    DEVICE_INTERFACE = 'org.bluez.Device1'
+    DBUS_PROP_IFACE = 'org.freedesktop.DBus.Properties'
+    DBUS_OM_IFACE = 'org.freedesktop.DBus.ObjectManager'
 
-        print("Setting up BT device")
+    # file path of the sdp record to laod
+    install_dir  = os.path.dirname(os.path.realpath(__file__))
+    SDP_RECORD_PATH = os.path.join(install_dir,
+                                   'sdp_record.xml')
+    # UUID for HID service (1124)
+    # https://www.bluetooth.com/specifications/assigned-numbers/service-discovery
+    UUID = '00001124-0000-1000-8000-00805f9b34fb'
 
-        self.init_bt_device()
-        self.init_bluez_profile()
-                    
+    def __init__(self, hci=0):
+        self.scontrol = None
+        self.ccontrol = None  # Socket object for control
+        self.sinterrupt = None
+        self.cinterrupt = None  # Socket object for interrupt
+        self.dev_path = '/org/bluez/hci{}'.format(hci)
+        print('Setting up BT device')
+        self.bus = dbus.SystemBus()
+        self.adapter_methods = dbus.Interface(
+            self.bus.get_object('org.bluez',
+                                self.dev_path),
+            self.ADAPTER_IFACE)
+        self.adapter_property = dbus.Interface(
+            self.bus.get_object('org.bluez',
+                                self.dev_path),
+            self.DBUS_PROP_IFACE)
 
-    #configure the bluetooth hardware device
-    def init_bt_device(self):
+        self.bus.add_signal_receiver(self.interfaces_added,
+                                     dbus_interface=self.DBUS_OM_IFACE,
+                                     signal_name='InterfacesAdded')
 
+        self.bus.add_signal_receiver(self._properties_changed,
+                                     dbus_interface=self.DBUS_PROP_IFACE,
+                                     signal_name='PropertiesChanged',
+                                     arg0=self.DEVICE_INTERFACE,
+                                     path_keyword='path')
 
-        print("Configuring for name "+BTKbDevice.MY_DEV_NAME)
+        print('Configuring for name {}'.format(BTKbDevice.MY_DEV_NAME))
 
-        #set the device class to a keybord and set the name
-        os.system("hciconfig hcio class 0x002540")
-        os.system("hciconfig hcio name " + BTKbDevice.MY_DEV_NAME)
+        self.config_hid_profile()
 
-        #make the device discoverable
-        os.system("hciconfig hcio piscan")
+        # set the Bluetooth device configuration
+        self.alias = BTKbDevice.MY_DEV_NAME
+        self.discoverabletimeout = 0
+        self.discoverable = True
 
+    def interfaces_added(self):
+        pass
 
-    #set up a bluez profile to advertise device capabilities from a loaded service record
-    def init_bluez_profile(self):
+    def _properties_changed(self, interface, changed, invalidated, path):
+        if self.on_disconnect is not None:
+            if 'Connected' in changed:
+                if not changed['Connected']:
+                    self.on_disconnect()
 
-        print("Configuring Bluez Profile")
+    def on_disconnect(self):
+        print('The client has been disconnect')
+        self.listen()
 
-        #setup profile options
-        service_record=self.read_sdp_service_record()
+    @property
+    def address(self):
+        """Return the adapter MAC address."""
+        return self.adapter_property.Get(self.ADAPTER_IFACE,
+                                         'Address')
+
+    @property
+    def powered(self):
+        """
+        power state of the Adapter.
+        """
+        return self.adapter_property.Get(self.ADAPTER_IFACE, 'Powered')
+
+    @powered.setter
+    def powered(self, new_state):
+        self.adapter_property.Set(self.ADAPTER_IFACE, 'Powered', new_state)
+
+    @property
+    def alias(self):
+        return self.adapter_property.Get(self.ADAPTER_IFACE,
+                                         'Alias')
+
+    @alias.setter
+    def alias(self, new_alias):
+        self.adapter_property.Set(self.ADAPTER_IFACE,
+                                  'Alias',
+                                  new_alias)
+
+    @property
+    def discoverabletimeout(self):
+        """Discoverable timeout of the Adapter."""
+        return self.adapter_props.Get(self.ADAPTER_IFACE,
+                                      'DiscoverableTimeout')
+
+    @discoverabletimeout.setter
+    def discoverabletimeout(self, new_timeout):
+        self.adapter_property.Set(self.ADAPTER_IFACE,
+                                  'DiscoverableTimeout',
+                                  dbus.UInt32(new_timeout))
+
+    @property
+    def discoverable(self):
+        """Discoverable state of the Adapter."""
+        return self.adapter_props.Get(
+            self.ADAPTER_INTERFACE, 'Discoverable')
+
+    @discoverable.setter
+    def discoverable(self, new_state):
+        self.adapter_property.Set(self.ADAPTER_IFACE,
+                                  'Discoverable',
+                                  new_state)
+
+    def config_hid_profile(self):
+        """
+        Setup and register HID Profile
+        """
+
+        print('Configuring Bluez Profile')
+        service_record = self.read_sdp_service_record()
 
         opts = {
-            "ServiceRecord":service_record,
-            "Role":"server",
-            "RequireAuthentication":False,
-            "RequireAuthorization":False
+            'Role': 'server',
+            'RequireAuthentication': False,
+            'RequireAuthorization': False,
+            'AutoConnect': True,
+            'ServiceRecord': service_record,
         }
 
-        #retrieve a proxy for the bluez profile interface
-        bus = dbus.SystemBus()
-        manager = dbus.Interface(bus.get_object("org.bluez","/org/bluez"), "org.bluez.ProfileManager1")
+        manager = dbus.Interface(self.bus.get_object('org.bluez',
+                                                     '/org/bluez'),
+                                 'org.bluez.ProfileManager1')
 
-        profile = BTKbBluezProfile(bus, BTKbDevice.PROFILE_DBUS_PATH)
+        HumanInterfaceDeviceProfile(self.bus,
+                                    BTKbDevice.PROFILE_DBUS_PATH)
 
-        manager.RegisterProfile(BTKbDevice.PROFILE_DBUS_PATH, BTKbDevice.UUID,opts)
+        manager.RegisterProfile(BTKbDevice.PROFILE_DBUS_PATH,
+                                BTKbDevice.UUID,
+                                opts)
 
-        print("Profile registered ")
+        print('Profile registered ')
 
-
-    #read and return an sdp record from a file
-    def read_sdp_service_record(self):
-
-        print("Reading service record")
-
+    @staticmethod
+    def read_sdp_service_record():
+        """
+        Read and return SDP record from a file
+        :return: (string) SDP record
+        """
+        print('Reading service record')
         try:
-            fh = open(BTKbDevice.SDP_RECORD_PATH, "r")
-        except:
-            sys.exit("Could not open the sdp record. Exiting...")
+            fh = open(BTKbDevice.SDP_RECORD_PATH, 'r')
+        except OSError:
+            sys.exit('Could not open the sdp record. Exiting...')
 
-        return fh.read()   
+        return fh.read()
 
-
-
-    #listen for incoming client connections
-    #ideally this would be handled by the Bluez 5 profile 
-    #but that didn't seem to work
     def listen(self):
+        """
+        Listen for connections coming from HID client
+        """
 
-        print("Waiting for connections")
-        self.scontrol=BluetoothSocket(L2CAP)
-        self.sinterrupt=BluetoothSocket(L2CAP)
+        print('Waiting for connections')
+        self.scontrol = socket.socket(socket.AF_BLUETOOTH,
+                                      socket.SOCK_SEQPACKET,
+                                      socket.BTPROTO_L2CAP)
+        self.scontrol.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sinterrupt = socket.socket(socket.AF_BLUETOOTH,
+                                        socket.SOCK_SEQPACKET,
+                                        socket.BTPROTO_L2CAP)
+        self.sinterrupt.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.scontrol.bind((self.address, self.P_CTRL))
+        self.sinterrupt.bind((self.address, self.P_INTR))
 
-        #bind these sockets to a port - port zero to select next available		
-        self.scontrol.bind((self.MY_ADDRESS,self.P_CTRL))
-        self.sinterrupt.bind((self.MY_ADDRESS,self.P_INTR ))
-
-        #Start listening on the server sockets 
-        self.scontrol.listen(1) # Limit of 1 connection
+        # Start listening on the server sockets
+        self.scontrol.listen(1)  # Limit of 1 connection
         self.sinterrupt.listen(1)
 
-        self.ccontrol,cinfo = self.scontrol.accept()
-        print ("Got a connection on the control channel from " + cinfo[0])
+        self.ccontrol, cinfo = self.scontrol.accept()
+        print('{} connected on the control socket'.format(cinfo[0]))
 
         self.cinterrupt, cinfo = self.sinterrupt.accept()
-        print ("Got a connection on the interrupt channel from " + cinfo[0])
-
+        print('{} connected on the interrupt channel'.format(cinfo[0]))
 
     #send a string to the bluetooth host machine
     def send_string(self,message):
@@ -171,7 +296,7 @@ class BTKbDevice():
 
 
 #define a dbus service that emulates a bluetooth keyboard
-#this will enable different clients to connect to and use 
+#this will enable different clients to connect to and use
 #the service
 class  BTKbService(dbus.service.Object):
 
@@ -189,7 +314,7 @@ class  BTKbService(dbus.service.Object):
         #start listening for connections
         self.device.listen();
 
-            
+
     @dbus.service.method('org.yaptb.btkbservice', in_signature='yay')
     def send_keys(self,modifier_byte,keys):
 
@@ -206,7 +331,7 @@ class  BTKbService(dbus.service.Object):
         #         cmd_str+=chr(key_code)
         #     count+=1
 
-        self.device.send_string(cmd_str);		
+        self.device.send_string(cmd_str);
 
 
 #main routine

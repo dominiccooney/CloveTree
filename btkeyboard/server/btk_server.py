@@ -4,9 +4,11 @@
 # 
 # Adapted from 
 # www.linuxuser.co.uk/tutorials/emulate-bluetooth-keyboard-with-the-raspberry-p
+# https://gist.github.com/ukBaz/a47e71e7b87fbc851b27cde7d1c0fcf0#file-btk_server-py
 
 from optparse import OptionParser, make_option
 import os
+import signal
 import sys
 import uuid
 import dbus
@@ -164,9 +166,8 @@ class BTKbDevice():
 
     #send a string to the bluetooth host machine
     def send_string(self,message):
-         print("Sending ", bytes(message, 'utf-8'))
-         self.cinterrupt.send(message)
-
+        print("Sending ", type(message), repr(message))
+        self.cinterrupt.send(message)
 
 
 #define a dbus service that emulates a bluetooth keyboard
@@ -192,17 +193,18 @@ class  BTKbService(dbus.service.Object):
     @dbus.service.method('org.yaptb.btkbservice', in_signature='yay')
     def send_keys(self,modifier_byte,keys):
 
-        cmd_str=""
-        cmd_str+=chr(0xA1)
-        cmd_str+=chr(0x01)
-        cmd_str+=chr(modifier_byte)
-        cmd_str+=chr(0x00)
+        assert len(keys) == 6, f'should be six keys, was {len(keys)}'
+        cmd_str=b'\xa1\x01' + bytes([modifier_byte, 0x00] + keys[0:6])
+        # cmd_str+=chr(0xA1)
+        # cmd_str+=chr(0x01)
+        # cmd_str+=chr(modifier_byte)
+        # cmd_str+=chr(0x00)
 
-        count=0
-        for key_code in keys:
-            if(count<6):
-                cmd_str+=chr(key_code)
-            count+=1
+        # count=0
+        # for key_code in keys:
+        #     if(count<6):
+        #         cmd_str+=chr(key_code)
+        #     count+=1
 
         self.device.send_string(cmd_str);		
 
@@ -215,5 +217,6 @@ if __name__ == "__main__":
 
     dbus.mainloop.qt.DBusQtMainLoop(set_as_default=True)
     app = PyQt4.QtCore.QCoreApplication([])
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     myservice = BTKbService();
-    app.exec_()
+    sys.exit(app.exec_())

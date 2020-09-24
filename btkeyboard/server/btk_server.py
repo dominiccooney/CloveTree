@@ -97,7 +97,7 @@ class BTKbBluezProfile(dbus.service.Object):
 #
 class BTKbDevice():
     #change these constants
-    MY_ADDRESS="B8:27:EB:5A:D2:BE"
+    MY_ADDRESS="B8:27:EB:42:55:2A"
     MY_DEV_NAME="DeskPi_BTKb"
 
     #define some constants
@@ -154,18 +154,19 @@ class BTKbDevice():
         self.discoverabletimeout = 0
         self.discoverable = True
 
-    def interfaces_added(self):
-        pass
+    def interfaces_added(self, interface, changed, path):
+        print(f'interfaces added: {interface} changed: {changed} path: {path}')
 
     def _properties_changed(self, interface, changed, invalidated, path):
+        print(f'properties changed: {interface} changed: {changed} invalidated: {invalidated} path: {path}')
         if self.on_disconnect is not None:
             if 'Connected' in changed:
                 if not changed['Connected']:
                     self.on_disconnect()
 
     def on_disconnect(self):
-        print('The client has been disconnect')
-        self.listen()
+        print('The client has been "disconnected" (ignoring)')
+        #self.listen()
 
     @property
     def address(self):
